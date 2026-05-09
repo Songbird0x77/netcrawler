@@ -3,7 +3,7 @@
 An AI-driven reconnaissance and vulnerability scanning agent powered by a local Ollama LLM. The agent reasons about your target, decides which tools to run, interprets their output, and produces a structured report.
 
 ---
-<img width="1157" height="359" alt="image" src="https://github.com/user-attachments/assets/b3281145-cac3-44fc-a2bb-a266b02387c8" />
+<img width="1086" height="351" alt="image" src="https://github.com/user-attachments/assets/53270377-dfb1-4cc7-b703-c9b2a60516a7" />
 
 ## Architecture
 
