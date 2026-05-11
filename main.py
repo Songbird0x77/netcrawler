@@ -5,6 +5,7 @@ import typer
 from tui.app import NetCrawlerApp
 
 app = typer.Typer(
+    name="netcrawler",
     add_completion=False,
     help="""
 \b
@@ -19,6 +20,7 @@ Examples:
   netcrawler 192.168.1.1 --profile aggressive
   netcrawler example.com --model mistral --profile stealth
   netcrawler example.com --verbose
+  netcrawler example.com --timeout 30
 
 \b
 Profiles:
@@ -36,7 +38,6 @@ Models (requires Ollama):
 Legal:
   Only scan targets you have explicit written permission to test.
     """,
-    epilog="For more info: https://github.com/YOUR_USERNAME/netcrawler",
 )
 
 PROFILES = {
@@ -65,6 +66,12 @@ def run(
         help="Scan profile: stealth / default / aggressive",
         metavar="PROFILE",
     ),
+    timeout: int = typer.Option(
+        0,
+        "--timeout", "-t",
+        help="Max scan duration in minutes (0 = no limit)",
+        metavar="MINUTES",
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose", "-v",
@@ -76,7 +83,13 @@ def run(
         typer.echo(f"[!] Unknown profile '{profile}'. Choose from: {', '.join(PROFILES)}")
         raise typer.Exit(1)
 
-    tui = NetCrawlerApp(target=target, model=model, profile=profile, verbose=verbose)
+    tui = NetCrawlerApp(
+        target=target,
+        model=model,
+        profile=profile,
+        verbose=verbose,
+        timeout_minutes=timeout,
+    )
     tui.run()
 
 

@@ -8,7 +8,6 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from rich.align import Align
-from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich import box
 from core.context import ScanContext
 from agent.ollama import OllamaClient
@@ -53,14 +52,21 @@ PROFILE_COLOR = {"stealth": "blue", "default": "cyan", "aggressive": "red"}
 
 
 class NetCrawlerApp:
-    def __init__(self, target: str, model: str, profile: str = "default", verbose: bool = False):
-        self.target   = target
-        self.model    = model
-        self.profile  = profile
-        self.verbose  = verbose
-        self.console  = Console()
-        self._current_tool = ""
-        self._start_time   = None
+    def __init__(
+        self,
+        target: str,
+        model: str,
+        profile: str = "default",
+        verbose: bool = False,
+        timeout_minutes: int = 0,
+    ):
+        self.target          = target
+        self.model           = model
+        self.profile         = profile
+        self.verbose         = verbose
+        self.timeout_minutes = timeout_minutes
+        self.console         = Console()
+        self._start_time     = None
 
     def run(self):
         self._print_banner()
@@ -77,6 +83,8 @@ class NetCrawlerApp:
         self.console.print(f"[bold green][*][/] Web     : {'yes — ' + ctx.target_url if ctx.is_web else 'no'}")
         self.console.print(f"[bold green][*][/] Model   : [magenta]{self.model}[/]")
         self.console.print(f"[bold green][*][/] Profile : [{pc}]{self.profile.upper()}[/]")
+        if self.timeout_minutes:
+            self.console.print(f"[bold green][*][/] Timeout : {self.timeout_minutes} minutes")
         self.console.print(f"[bold green][*][/] Started : {datetime.now():%Y-%m-%d %H:%M:%S}\n")
 
         if not llm.is_available():
@@ -87,7 +95,11 @@ class NetCrawlerApp:
 
         self.console.print(f"[dim green]    Ollama connected → {llm.host}[/]\n")
 
-        loop = AgentLoop(context=ctx, llm=llm)
+        loop = AgentLoop(
+            context=ctx,
+            llm=llm,
+            timeout_minutes=self.timeout_minutes,
+        )
         self._wire_callbacks(loop, ctx)
         self._start_time = time.time()
 
@@ -106,15 +118,12 @@ class NetCrawlerApp:
                 self.console.print(f"[dim]         → {reason}[/]")
 
         def on_action(tool: str):
-            self._current_tool = tool
             label = STAGE_LABEL.get(tool, f"[white]{tool.upper()}[/]")
             self.console.print(f"\n[bold green]  ▶ RUN[/]   {label}")
             self.console.rule(characters="─", style="dim green")
-
-            # Live severity counter
             counts = ctx.severity_counts()
             self.console.print(
-                f"[dim]  Findings so far → "
+                f"[dim]  Findings → "
                 f"[red]CRIT:{counts['critical']}[/] "
                 f"[yellow]HIGH:{counts['high']}[/] "
                 f"[dim yellow]MED:{counts['medium']}[/] "
@@ -122,14 +131,14 @@ class NetCrawlerApp:
             )
 
         def on_result(tool: str, interpretation: str):
-            panel = Panel(
-                interpretation,
-                title=f"[bold green]{tool} — findings[/]",
-                border_style="green",
-                padding=(0, 2),
-            )
-            self.console.print(panel)
-
+            if interpretation and interpretation.strip():
+                panel = Panel(
+                    interpretation,
+                    title=f"[bold green]{tool} — findings[/]",
+                    border_style="green",
+                    padding=(0, 2),
+                )
+                self.console.print(panel)
             recent = [f for f in ctx.findings if f.source == tool]
             for f in recent[-5:]:
                 color = SEVERITY_COLOR.get(f.severity, "white")
@@ -139,14 +148,18 @@ class NetCrawlerApp:
             elapsed = time.time() - self._start_time if self._start_time else 0
             self.console.print(f"\n[bold green]  ✓ Scan complete[/] [dim]({elapsed:.0f}s)[/]")
 
+        def on_timeout():
+            self.console.print(f"\n[bold yellow]  ⏱ Timeout reached — generating report...[/]")
+
         def on_error(msg: str):
             self.console.print(f"\n[bold red]  ✗ ERROR:[/] {msg}")
 
-        loop.on_thought = on_thought
-        loop.on_action  = on_action
-        loop.on_result  = on_result
-        loop.on_done    = on_done
-        loop.on_error   = on_error
+        loop.on_thought  = on_thought
+        loop.on_action   = on_action
+        loop.on_result   = on_result
+        loop.on_done     = on_done
+        loop.on_timeout  = on_timeout
+        loop.on_error    = on_error
 
     def _print_summary(self, ctx: ScanContext):
         elapsed = time.time() - self._start_time if self._start_time else 0
@@ -156,7 +169,6 @@ class NetCrawlerApp:
         self.console.rule("[bold green] SCAN COMPLETE [/]", style="green")
         self.console.print()
 
-        # Severity banner
         self.console.print(
             Align.center(
                 f"[bold red]● CRITICAL: {counts['critical']}[/]  "
@@ -168,13 +180,12 @@ class NetCrawlerApp:
         )
         self.console.print()
 
-        # Stats table
         stats = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
         stats.add_column(style="dim")
         stats.add_column(style="bold cyan")
         stats.add_row("Target",      ctx.target_host)
         stats.add_row("Profile",     ctx.profile)
-        stats.add_row("Duration",    f"{elapsed:.0f}s")
+        stats.add_row("Duration",    f"{elapsed:.0f}s ({elapsed/60:.1f}m)")
         stats.add_row("Subdomains",  str(len(ctx.subdomains)))
         stats.add_row("Alive hosts", str(len(ctx.alive_hosts)))
         stats.add_row("Open ports",  str(len(set(ctx.ports))))
@@ -184,7 +195,6 @@ class NetCrawlerApp:
         stats.add_row("Stages run",  ", ".join(ctx.completed_stages) or "none")
         self.console.print(stats)
 
-        # Findings table
         if ctx.findings:
             self.console.print()
             table = Table(
@@ -209,7 +219,6 @@ class NetCrawlerApp:
                 )
             self.console.print(table)
 
-        # Report paths
         from output.reporter import generate_report
         import os
         md_path   = generate_report(ctx)
@@ -227,4 +236,3 @@ class NetCrawlerApp:
         self.console.print(Align.center(Text("AI-Powered Pentesting Agent", style="bold white")))
         self.console.print(Align.center(Text(f"Powered by Ollama · {datetime.now():%Y-%m-%d}", style="dim")))
         self.console.print()
-

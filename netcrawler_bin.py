@@ -2,6 +2,10 @@
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Override the program name so help shows "netcrawler" not "netcrawler_bin.py"
+sys.argv[0] = "netcrawler"
+
 from main import app
 
 if __name__ == "__main__":

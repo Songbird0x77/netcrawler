@@ -20,7 +20,7 @@ AVAILABLE TOOLS:
   web_crawler       — robots.txt, sitemap.xml, .env/.git probing (web targets only)
   ssl_audit         — TLS/SSL cipher audit, Heartbleed, POODLE (if port 443/8443 open)
   dir_fuzz          — ffuf directory fuzzing (web targets only — run after fingerprint)
-  vuln_scan         — Nuclei template scan (web targets — run after fingerprint)
+  vuln_scan         — Nuclei template scan (ALWAYS run on web targets — WAF does not prevent this)
   ftp_enum          — FTP anonymous login (only if port 21 open)
   ssh_enum          — SSH banner + CVE check (only if port 22 open)
   smb_enum          — SMB null session, signing, EternalBlue (only if port 139/445 open)
@@ -43,12 +43,12 @@ DECISION RULES — follow strictly:
    - 27017 → mongodb_enum
 5. Never run a service tool if its port is not open.
 6. Never repeat a completed tool.
-7. Call done when all relevant tools have run.
+7. ALWAYS run vuln_scan on web targets — even if a WAF is detected. Nuclei uses specific templates that often bypass WAFs.
+8. Call done only after vuln_scan has completed on web targets.
 
 RATE LIMITING AND SAFETY RULES — mandatory:
 - Never suggest running tools in parallel — always sequential.
-- All tools already have built-in rate limiting. Do not instruct tools to go faster.
-- If a WAF or rate limit is detected, recommend slower tools only.
+- All tools already have built-in rate limiting.
 - This tool is for authorised penetration testing only.
 
 Respond ONLY with valid JSON — no markdown, no extra text:
@@ -61,17 +61,17 @@ Respond ONLY with valid JSON — no markdown, no extra text:
 
 INTERPRET_SYSTEM = """You are a senior penetration tester analysing raw tool output.
 
-STRICT RULES — violating these is not acceptable:
-- You will be given RAW TOOL OUTPUT ONLY.
+STRICT RULES:
 - Report ONLY findings explicitly present in the raw output text provided.
 - Do NOT use any prior knowledge about the target.
 - Do NOT infer or speculate about findings not literally present in the output.
-- Do NOT summarise the scan state — only summarise what THIS TOOL returned.
 - If the output is empty, shows only errors, or shows nothing found — say exactly that.
 - For each finding include the EXACT line, URL, port, or value from the raw output.
-- Clearly distinguish: CONFIRMED (directly in output) vs POTENTIAL (inferred).
-- Never report credentials, vulnerabilities, or exposures unless they literally appear in the output.
-- Format: bullet points, max 8 bullets, each with a severity tag: [CRITICAL/HIGH/MEDIUM/LOW/INFO]
+- An 'A' cipher rating means GOOD security — do NOT flag it as HIGH or CRITICAL.
+- A certificate being valid means GOOD — do NOT flag valid certs as vulnerabilities.
+- Only flag actual weaknesses: expired certs, weak ciphers (RC4/DES/NULL), SSLv2/v3, Heartbleed.
+- Tool errors (like wrong flags) are INFO at most — not CRITICAL.
+- Format: bullet points, max 8 bullets, each with [CRITICAL/HIGH/MEDIUM/LOW/INFO]
 """
 
 
@@ -151,8 +151,6 @@ class OllamaClient:
             return AgentDecision(thought=f"LLM error: {e}", action="done", reason="error")
 
     def interpret(self, tool_name: str, raw_output: str, context_summary: str) -> str:
-        # Intentionally NOT passing context_summary into the LLM message
-        # The LLM must only analyse what the tool actually returned
         if not raw_output or raw_output.strip() in ("", "[skipped]", "[timeout]"):
             return f"[{tool_name}] produced no output."
 
@@ -163,7 +161,7 @@ class OllamaClient:
                 f"--- RAW OUTPUT START ---\n"
                 f"{raw_output[:4000]}\n"
                 f"--- RAW OUTPUT END ---\n\n"
-                "Analyse ONLY the raw output above. Do not use any other information."
+                "Analyse ONLY the raw output above."
             )},
         ]
         payload = json.dumps({

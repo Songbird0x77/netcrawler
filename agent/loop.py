@@ -1,7 +1,6 @@
 """Agent loop — observe → think → act → repeat."""
 from __future__ import annotations
 import time
-from utils.rate_limiter import limiter
 from typing import Callable
 from core.context import ScanContext
 from agent.ollama import OllamaClient, AgentDecision
@@ -21,6 +20,7 @@ from modules.services.mysql import run_mysql_enum
 from modules.services.redis import run_redis_enum
 from modules.services.mongodb import run_mongodb_enum
 from output.reporter import generate_report
+from utils.rate_limiter import limiter
 
 TOOL_MAP: dict[str, Callable[[ScanContext, Callable], str]] = {
     "passive_recon":   run_passive_recon,
@@ -44,15 +44,29 @@ MAX_ITERATIONS = 25
 
 
 class AgentLoop:
-    def __init__(self, context: ScanContext, llm: OllamaClient):
-        self.ctx = context
-        self.llm = llm
+    def __init__(
+        self,
+        context: ScanContext,
+        llm: OllamaClient,
+        timeout_minutes: int = 0,
+    ):
+        self.ctx              = context
+        self.llm              = llm
+        self.timeout_minutes  = timeout_minutes
+        self.timeout_seconds  = timeout_minutes * 60 if timeout_minutes else 0
+        self.start_time       = time.time()
         self.history: list[dict] = []
-        self.on_thought: Callable = lambda t, r: None
-        self.on_action: Callable = lambda tool: None
-        self.on_result: Callable = lambda tool, interp: None
-        self.on_done: Callable = lambda: None
-        self.on_error: Callable = lambda msg: None
+        self.on_thought:  Callable = lambda t, r: None
+        self.on_action:   Callable = lambda tool: None
+        self.on_result:   Callable = lambda tool, interp: None
+        self.on_done:     Callable = lambda: None
+        self.on_timeout:  Callable = lambda: None
+        self.on_error:    Callable = lambda msg: None
+
+    def _timed_out(self) -> bool:
+        if not self.timeout_seconds:
+            return False
+        return (time.time() - self.start_time) >= self.timeout_seconds
 
     def run(self):
         if not self.llm.is_available():
@@ -63,6 +77,12 @@ class AgentLoop:
             return
 
         for iteration in range(MAX_ITERATIONS):
+            if self._timed_out():
+                self.on_timeout()
+                generate_report(self.ctx)
+                self.on_done()
+                return
+
             summary  = self.ctx.summary_for_llm()
             decision = self.llm.decide(summary, self.history)
 
@@ -74,7 +94,7 @@ class AgentLoop:
                 self.on_done()
                 return
 
-            # Fuzzy match — handle dashes vs underscores
+            # Fuzzy match
             tool_fn = TOOL_MAP.get(decision.action)
             if tool_fn is None:
                 normalised = decision.action.replace("-", "_").strip()
@@ -82,13 +102,12 @@ class AgentLoop:
                     decision.action = normalised
                     tool_fn = TOOL_MAP[normalised]
                 else:
-                    self.on_error(f"Unknown action from LLM: {decision.action!r}")
+                    self.on_error(f"Unknown action: {decision.action!r}")
                     self.history.append({
                         "role": "user",
                         "content": (
-                            f"{decision.action!r} is not a valid tool. "
-                            f"Valid tools: {', '.join(TOOL_MAP.keys())}. "
-                            "Pick one."
+                            f"{decision.action!r} is not valid. "
+                            f"Valid tools: {', '.join(TOOL_MAP.keys())}."
                         ),
                     })
                     continue
@@ -99,7 +118,7 @@ class AgentLoop:
                     "role": "user",
                     "content": (
                         f"{decision.action} already completed. "
-                        f"Remaining tools: {', '.join(remaining) or 'none — call done'}."
+                        f"Remaining: {', '.join(remaining) or 'none — call done'}."
                     ),
                 })
                 continue
@@ -130,7 +149,7 @@ class AgentLoop:
                 self.history.append({"role": "assistant", "content": err})
                 self.ctx.completed_stages.append(decision.action)
 
-            limiter.wait()  # global rate limit between tools
+            limiter.wait()
 
         generate_report(self.ctx)
         self.on_done()

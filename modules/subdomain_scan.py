@@ -1,8 +1,10 @@
-"""Active subdomain scanning — httpx alive check + port scan on interesting ones."""
+"""Active subdomain scanning — httpx alive check + scoring."""
 from __future__ import annotations
 import subprocess
 import shutil
 import re
+import tempfile
+import os
 from typing import Callable
 from core.context import ScanContext
 
@@ -24,6 +26,20 @@ def _run(cmd: list[str], timeout: int = 60) -> str:
         return f"[{cmd[0]} not installed]"
 
 
+def _get_httpx_list_flag() -> str:
+    """Detect correct httpx flag for reading from a file."""
+    if not shutil.which("httpx"):
+        return None
+    # Try to detect version/flags
+    help_output = _run(["httpx", "--help"], timeout=5)
+    if "-l " in help_output or "-list" in help_output:
+        return "-l"
+    if "-i " in help_output or "--input" in help_output:
+        return "-i"
+    # Try -list (projectdiscovery httpx)
+    return "-l"
+
+
 def run_subdomain_scan(ctx: ScanContext, status: Callable[[str], None]) -> str:
     if not ctx.subdomains:
         return "[skipped — no subdomains to scan]"
@@ -34,41 +50,62 @@ def run_subdomain_scan(ctx: ScanContext, status: Callable[[str], None]) -> str:
     # --- httpx alive check ---
     if shutil.which("httpx"):
         status(f"Checking {len(ctx.subdomains)} subdomains with httpx...")
-        import tempfile, os
+
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("\n".join(ctx.subdomains))
             tmp = f.name
+
         try:
+            list_flag = _get_httpx_list_flag()
+
+            # Try projectdiscovery httpx first (most common)
             raw = _run([
-                "httpx", "-l", tmp,
-                "-silent", "-status-code", "-title",
-                "-tech-detect", "-follow-redirects",
-                "-timeout", "5", "-threads", "20",
+                "httpx",
+                list_flag, tmp,
+                "-silent",
+                "-status-code",
+                "-title",
+                "-follow-redirects",
+                "-timeout", "5",
+                "-threads", "20",
             ], timeout=120)
+
+            # If that failed try without some flags
+            if "Error:" in raw or "unknown flag" in raw.lower():
+                raw = _run([
+                    "httpx",
+                    list_flag, tmp,
+                    "-silent",
+                    "-timeout", "5",
+                ], timeout=120)
+
             output.append(f"=== HTTPX ALIVE CHECK ===\n{raw}")
 
             for line in raw.splitlines():
                 line = line.strip()
-                if line and "http" in line:
+                if line and ("http://" in line or "https://" in line):
                     alive.append(line)
-                    # Extract URL
-                    url_match = re.match(r'(https?://\S+)', line)
+                    url_match = re.match(r'(https?://[^\s\[]+)', line)
                     if url_match:
-                        u = url_match.group(1).rstrip("]"),
-                        ctx.alive_hosts.append(u[0])
+                        ctx.alive_hosts.append(url_match.group(1).rstrip("/"))
+
+        except Exception as e:
+            output.append(f"httpx error: {e}")
         finally:
-            os.unlink(tmp)
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+
     else:
-        # Fallback: basic curl check on top subdomains
-        status("httpx not found — checking top 10 subdomains with curl...")
-        output.append("=== CURL ALIVE CHECK (httpx not installed) ===")
+        # Fallback: basic curl check
+        status("httpx not found — checking subdomains with curl...")
+        output.append("=== CURL ALIVE CHECK ===")
         for sub in ctx.subdomains[:10]:
             for scheme in ["https", "http"]:
                 url = f"{scheme}://{sub}"
                 result = subprocess.run(
                     ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
                      "--connect-timeout", "3", "-L", url],
-                    capture_output=True, text=True, timeout=5
+                    capture_output=True, text=True, timeout=8
                 )
                 code = result.stdout.strip()
                 if code and code not in ("000", ""):
@@ -77,34 +114,29 @@ def run_subdomain_scan(ctx: ScanContext, status: Callable[[str], None]) -> str:
                     ctx.alive_hosts.append(url)
                     break
 
-    # --- Score and flag interesting subdomains ---
+    # --- Score high-value subdomains ---
     high_value = []
     for sub in ctx.subdomains:
-        score = sum(1 for kw in INTERESTING_KEYWORDS if kw in sub.lower())
-        if score > 0:
-            high_value.append((score, sub))
+        if any(kw in sub.lower() for kw in INTERESTING_KEYWORDS):
+            high_value.append(sub)
 
-    high_value.sort(reverse=True)
-    top = [s for _, s in high_value[:15]]
-
-    if top:
+    if high_value:
         output.append(f"\n=== HIGH-VALUE SUBDOMAINS ===")
-        for sub in top:
+        for sub in high_value:
             matched = [kw for kw in INTERESTING_KEYWORDS if kw in sub.lower()]
             output.append(f"  {sub} (keywords: {', '.join(matched)})")
 
         ctx.add_finding(
             severity="high",
-            title=f"High-value subdomains identified ({len(top)})",
+            title=f"High-value subdomains identified ({len(high_value)})",
             description=(
-                f"These subdomains contain keywords suggesting sensitive services "
-                f"(admin panels, dev environments, APIs, CI/CD): "
-                + ", ".join(top[:10])
+                "Subdomains suggesting sensitive services: "
+                + ", ".join(high_value[:10])
             ),
             source="subdomain_scan",
             host=ctx.target_host,
             tags=["subdomains", "attack-surface", "high-value"],
-            raw="\n".join(top),
+            raw="\n".join(high_value),
         )
 
     # --- Alive summary ---
@@ -112,7 +144,7 @@ def run_subdomain_scan(ctx: ScanContext, status: Callable[[str], None]) -> str:
         ctx.add_finding(
             severity="info",
             title=f"Alive subdomains confirmed ({len(alive)})",
-            description=f"{len(alive)} subdomains responding to HTTP/HTTPS requests.",
+            description=f"{len(alive)} subdomains responding to HTTP/HTTPS.",
             source="subdomain_scan",
             host=ctx.target_host,
             tags=["subdomains", "alive"],
