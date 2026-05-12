@@ -76,20 +76,20 @@ go install github.com/ffuf/ffuf/v2@latest
 
 ```bash
 # Domain / website
-python main.py example.com
-python main.py https://example.com
+netcrawler example.com
+netcrawler https://example.com
 
 # IP address
-python main.py 192.168.1.1
+netcrawler 192.168.1.1
 
 # CIDR range
-python main.py 192.168.1.0/24
+netcrawler 192.168.1.0/24
 
 # Choose model
-python main.py example.com --model mistral
+netcrawler example.com --model mistral
 
 # Verbose (show raw tool output)
-python main.py example.com --verbose
+netcrawler example.com --verbose
 ```
 
 ---
