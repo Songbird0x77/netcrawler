@@ -133,3 +133,5 @@ Reports are saved to `~/netcrawler_reports/<host>_<timestamp>/`:
 ## Legal
 
 This tool is for authorised penetration testing only. Always obtain written permission before scanning any target you do not own.
+
+If you find this useful, a ⭐ on GitHub goes a long way — thank you!
