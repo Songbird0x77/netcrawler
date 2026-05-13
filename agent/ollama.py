@@ -83,18 +83,25 @@ class AgentDecision:
 
 
 def _get_host() -> str:
+    # Explicit override always wins
     if os.environ.get("OLLAMA_HOST"):
         return os.environ["OLLAMA_HOST"]
+
+    # Only use gateway IP if running inside WSL
+    # WSL sets Microsoft-specific entries in /proc/version
     try:
-        result = subprocess.run(
-            ["ip", "route"], capture_output=True, text=True, timeout=3
-        )
-        for line in result.stdout.splitlines():
-            if "default" in line:
-                ip = line.split()[2]
-                return f"http://{ip}:11434"
+        with open("/proc/version") as f:
+            if "microsoft" in f.read().lower():
+                result = subprocess.run(
+                    ["ip", "route"], capture_output=True, text=True, timeout=3
+                )
+                for line in result.stdout.splitlines():
+                    if "default" in line:
+                        ip = line.split()[2]
+                        return f"http://{ip}:11434"
     except Exception:
         pass
+
     return "http://localhost:11434"
 
 
