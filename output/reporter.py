@@ -13,7 +13,7 @@ def generate_report(ctx: ScanContext) -> str:
     """Write Markdown + JSON reports to ~/netcrawler_reports/. Returns the Markdown path."""
     timestamp = ctx.started_at.strftime("%Y%m%d_%H%M%S")
     safe_host  = ctx.target_host.replace(".", "_").replace("/", "_")
-    report_dir = f"/mnt/c/Users/taari/Desktop/netcrawler/netcrawler_reports/{safe_host}_{timestamp}"
+    report_dir = os.path.join(os.path.expanduser("~"), "netcrawler_reports", f"{safe_host}_{timestamp}")
     os.makedirs(report_dir, exist_ok=True)
 
     md_path   = os.path.join(report_dir, "report.md")
