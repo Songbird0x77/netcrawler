@@ -1,5 +1,12 @@
 # NetCrawler — AI Pentesting Agent
 
+![Python](https://img.shields.io/badge/python-3.10+-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Version](https://img.shields.io/badge/version-1.0.0-cyan)
+![Stars](https://img.shields.io/github/stars/Songbird0x77/netcrawler?style=social)
+![Forks](https://img.shields.io/github/forks/Songbird0x77/netcrawler?style=social)
+![Issues](https://img.shields.io/github/issues/Songbird0x77/netcrawler)
+
 An AI-driven reconnaissance and vulnerability scanning agent powered by a local Ollama LLM. The agent reasons about your target, decides which tools to run, interprets their output, and produces a structured report.
 
 ---

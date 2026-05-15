@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install rich typer
+
+      - name: Import check
+        run: |
+          python3 -c "
+          from core.context import ScanContext
+          from agent.loop import AgentLoop
+          from agent.ollama import OllamaClient
+          from modules.passive_recon import run_passive_recon
+          from modules.subdomain_scan import run_subdomain_scan
+          from modules.dns_enum import run_dns_enum
+          from modules.port_scan import run_port_scan
+          from modules.web_fingerprint import run_web_fingerprint
+          from modules.web_crawler import run_web_crawler
+          from modules.ssl_audit import run_ssl_audit
+          from modules.dir_fuzz import run_dir_fuzz
+          from modules.vuln_scan import run_vuln_scan
+          from modules.services.ftp import run_ftp_enum
+          from modules.services.ssh import run_ssh_enum
+          from modules.services.smb import run_smb_enum
+          from modules.services.mysql import run_mysql_enum
+          from modules.services.redis import run_redis_enum
+          from modules.services.mongodb import run_mongodb_enum
+          from output.reporter import generate_report
+          from output.html_report import generate_html_report
+          from utils.rate_limiter import limiter
+          print('All imports OK')
+          "
+
+      - name: Context test
+        run: |
+          python3 -c "
+          from core.context import ScanContext
+          ctx = ScanContext('example.com', profile='aggressive')
+          ctx.add_finding(severity='high', title='Test', description='Test', source='test', host='example.com', tags=[])
+          counts = ctx.severity_counts()
+          assert counts['high'] == 1
+          print('Context tests passed')
+          "
