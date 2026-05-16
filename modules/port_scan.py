@@ -41,7 +41,6 @@ def _parse_nmap(raw: str, ctx: ScanContext, host: str):
                 product=product, version=version, extra=extra,
             ))
 
-    # Generate findings for interesting ports
     interesting = {
         21:    ("ftp",       "high"),
         22:    ("ssh",       "info"),
@@ -80,37 +79,51 @@ def run_port_scan(ctx: ScanContext, status: Callable[[str], None]) -> str:
     host   = ctx.target_host
     output = []
 
-    # ── RustScan + Nmap (fast path) ───────────────────────────────────────────
     if shutil.which("rustscan"):
+        # Phase 1 — RustScan fast discovery
         status(f"Running RustScan on {host} (fast port discovery)...")
-
-        # RustScan discovers open ports quickly
         rs_raw = _run([
             "rustscan",
             "-a", host,
             "--range", "1-1000",
             "--timeout", "2000",
             "--tries", "1",
-            "-g",           # greppable output — just port numbers
-            "--", "-sV", "-sC", "--open",
-        ], timeout=180)
+            "-g",
+        ], timeout=60)
 
         output.append(f"=== RUSTSCAN ===\n{rs_raw}")
 
-        # RustScan with -- passes args to Nmap automatically
-        # Parse the combined output
-        if "open" in rs_raw.lower():
-            _parse_nmap(rs_raw, ctx, host)
-            status(f"RustScan complete — {len(ctx.ports)} open ports found")
+        # Parse greppable output: "host -> [80, 443]"
+        open_ports = []
+        if "->" in rs_raw:
+            ports_section = rs_raw.split("->")[-1]
+            open_ports = re.findall(r'\b(\d+)\b', ports_section)
+        elif re.search(r'\b\d+\b', rs_raw):
+            # fallback — just grab any numbers that look like ports
+            open_ports = [p for p in re.findall(r'\b(\d+)\b', rs_raw)
+                         if 1 <= int(p) <= 65535]
+
+        if open_ports:
+            port_list = ",".join(open_ports)
+            status(f"RustScan found {len(open_ports)} open port(s) — running Nmap service detection on {port_list}...")
+
+            # Phase 2 — Nmap service detection on open ports only
+            nmap_raw = _run([
+                "nmap", "-sV", "-sC", "--open", "-T4",
+                "-p", port_list,
+                "-oN", "-",
+                host,
+            ], timeout=90)
+
+            output.append(f"=== NMAP SERVICE DETECTION ===\n{nmap_raw}")
+            _parse_nmap(nmap_raw, ctx, host)
+            status(f"Port scan complete — {len(ctx.ports)} service(s) identified")
         else:
-            status("RustScan found no open ports — trying Nmap fallback...")
-            # Fall through to Nmap
+            status("RustScan found no open ports — falling back to Nmap...")
             _run_nmap(ctx, host, status, output)
 
-    # ── Pure Nmap fallback ────────────────────────────────────────────────────
     elif shutil.which("nmap"):
         _run_nmap(ctx, host, status, output)
-
     else:
         output.append("[neither rustscan nor nmap installed]")
 
@@ -118,41 +131,38 @@ def run_port_scan(ctx: ScanContext, status: Callable[[str], None]) -> str:
 
 
 def _run_nmap(ctx: ScanContext, host: str, status: Callable, output: list):
-    """Nmap two-phase scan — fast discovery then targeted service detection."""
-
+    """2-phase Nmap — fast discovery then targeted service detection."""
     if not shutil.which("nmap"):
         output.append("[nmap not installed]")
         return
 
-    # Phase 1 — fast port discovery (no service detection)
+    # Phase 1 — fast discovery, no service detection
     status(f"Nmap phase 1: fast port discovery on {host}...")
     discovery_raw = _run([
         "nmap", "-T4", "--open",
         "-p", "1-1000",
+        "--min-rate", "1000",
         "-oN", "-",
         host,
-    ], timeout=120)
+    ], timeout=90)
 
-    # Extract open ports from discovery
     open_ports = re.findall(r"(\d+)/tcp\s+open", discovery_raw)
 
     if open_ports:
         port_list = ",".join(open_ports)
-        status(f"Found {len(open_ports)} open ports — running service detection on {port_list}...")
+        status(f"Found {len(open_ports)} open port(s) — running service detection on {port_list}...")
 
-        # Phase 2 — service/version detection on open ports only
+        # Phase 2 — service detection on open ports only
         service_raw = _run([
-            "nmap", "-sV", "-sC",
-            "--open", "-T4",
+            "nmap", "-sV", "-sC", "--open", "-T4",
             "-p", port_list,
             "-oN", "-",
             host,
-        ], timeout=180)
+        ], timeout=90)
 
         output.append(f"=== NMAP (2-phase) ===\n{service_raw}")
         _parse_nmap(service_raw, ctx, host)
-        status(f"Nmap complete — {len(ctx.ports)} services identified")
+        status(f"Nmap complete — {len(ctx.ports)} service(s) identified")
     else:
-        status("No open ports found in discovery phase")
+        status("No open ports found in top 1000")
         output.append(f"=== NMAP ===\n{discovery_raw}")
-        output.append("[no open ports found in top 1000]")
