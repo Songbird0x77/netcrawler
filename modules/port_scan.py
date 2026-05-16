@@ -1,4 +1,4 @@
-"""Port scanning — Nmap service/version + script scan."""
+"""Port scanning — RustScan (fast discovery) + Nmap (service detection)."""
 from __future__ import annotations
 import subprocess
 import shutil
@@ -9,81 +9,55 @@ from core.context import ScanContext, Service
 
 def _run(cmd: list[str], timeout: int = 300) -> str:
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return (result.stdout + result.stderr).strip()
     except subprocess.TimeoutExpired:
-        return "[timeout — scan took too long]"
+        return "[timeout]"
     except FileNotFoundError:
         return f"[{cmd[0]} not installed]"
 
 
-def run_port_scan(ctx: ScanContext, status: Callable[[str], None]) -> str:
-    host = ctx.target_host
-
-    if not shutil.which("nmap"):
-        return "[nmap not installed]"
-
-    status(f"Running Nmap on {host} (top 1000 ports, -sV -sC)...")
-
-    raw = _run([
-        "nmap", "-sV", "-sC",
-        "--open",
-        "-T4",
-        "--top-ports", "1000",
-        "-oN", "-",
-        host,
-    ], timeout=300)
-
-    # Parse open ports + services from nmap output
-    port_re = re.compile(
-        r"(\d+)/(tcp|udp)\s+open\s+(\S+)\s*(.*)"
-    )
+def _parse_nmap(raw: str, ctx: ScanContext, host: str):
+    """Parse Nmap output into context ports and services."""
+    port_re = re.compile(r"(\d+)/(tcp|udp)\s+open\s+(\S+)\s*(.*)")
     for match in port_re.finditer(raw):
-        port = int(match.group(1))
-        proto = match.group(2)
+        port     = int(match.group(1))
+        proto    = match.group(2)
         svc_name = match.group(3)
-        extra = match.group(4).strip()
+        extra    = match.group(4).strip()
 
         if port not in ctx.ports:
             ctx.ports.append(port)
 
-        # Parse product/version from extra
         product, version = "", ""
-        version_match = re.search(r"(\S[\w\.\-]+)\s+([\d\.]+)", extra)
-        if version_match:
-            product = version_match.group(1)
-            version = version_match.group(2)
+        vm = re.search(r"(\S[\w\.\-]+)\s+([\d\.]+)", extra)
+        if vm:
+            product = vm.group(1)
+            version = vm.group(2)
 
-        svc = Service(
-            port=port,
-            protocol=proto,
-            name=svc_name,
-            product=product,
-            version=version,
-            extra=extra,
-        )
-        # Avoid duplicates
         if not any(s.port == port for s in ctx.services):
-            ctx.services.append(svc)
+            ctx.services.append(Service(
+                port=port, protocol=proto, name=svc_name,
+                product=product, version=version, extra=extra,
+            ))
 
-    # Generate findings for interesting services
+    # Generate findings for interesting ports
     interesting = {
-        21: ("ftp", "high"),
-        22: ("ssh", "info"),
-        23: ("telnet", "high"),
-        25: ("smtp", "medium"),
-        80: ("http", "info"),
-        443: ("https", "info"),
-        445: ("smb", "high"),
-        3306: ("mysql", "high"),
-        3389: ("rdp", "high"),
-        5432: ("postgres", "high"),
-        6379: ("redis", "high"),
-        27017: ("mongodb", "high"),
+        21:    ("ftp",       "high"),
+        22:    ("ssh",       "info"),
+        23:    ("telnet",    "high"),
+        25:    ("smtp",      "medium"),
+        80:    ("http",      "info"),
+        443:   ("https",     "info"),
+        445:   ("smb",       "high"),
+        3306:  ("mysql",     "high"),
+        3389:  ("rdp",       "high"),
+        5432:  ("postgres",  "high"),
+        6379:  ("redis",     "high"),
+        8080:  ("http-alt",  "info"),
+        8443:  ("https-alt", "info"),
+        27017: ("mongodb",   "high"),
     }
-
     for svc in ctx.services:
         if svc.port in interesting:
             _, severity = interesting[svc.port]
@@ -98,7 +72,87 @@ def run_port_scan(ctx: ScanContext, status: Callable[[str], None]) -> str:
                 host=host,
                 port=svc.port,
                 tags=["port", svc.name],
-                raw=raw[:200],
+                raw=raw[:300],
             )
 
-    return raw
+
+def run_port_scan(ctx: ScanContext, status: Callable[[str], None]) -> str:
+    host   = ctx.target_host
+    output = []
+
+    # ── RustScan + Nmap (fast path) ───────────────────────────────────────────
+    if shutil.which("rustscan"):
+        status(f"Running RustScan on {host} (fast port discovery)...")
+
+        # RustScan discovers open ports quickly
+        rs_raw = _run([
+            "rustscan",
+            "-a", host,
+            "--range", "1-1000",
+            "--timeout", "2000",
+            "--tries", "1",
+            "-g",           # greppable output — just port numbers
+            "--", "-sV", "-sC", "--open",
+        ], timeout=180)
+
+        output.append(f"=== RUSTSCAN ===\n{rs_raw}")
+
+        # RustScan with -- passes args to Nmap automatically
+        # Parse the combined output
+        if "open" in rs_raw.lower():
+            _parse_nmap(rs_raw, ctx, host)
+            status(f"RustScan complete — {len(ctx.ports)} open ports found")
+        else:
+            status("RustScan found no open ports — trying Nmap fallback...")
+            # Fall through to Nmap
+            _run_nmap(ctx, host, status, output)
+
+    # ── Pure Nmap fallback ────────────────────────────────────────────────────
+    elif shutil.which("nmap"):
+        _run_nmap(ctx, host, status, output)
+
+    else:
+        output.append("[neither rustscan nor nmap installed]")
+
+    return "\n\n".join(output)
+
+
+def _run_nmap(ctx: ScanContext, host: str, status: Callable, output: list):
+    """Nmap two-phase scan — fast discovery then targeted service detection."""
+
+    if not shutil.which("nmap"):
+        output.append("[nmap not installed]")
+        return
+
+    # Phase 1 — fast port discovery (no service detection)
+    status(f"Nmap phase 1: fast port discovery on {host}...")
+    discovery_raw = _run([
+        "nmap", "-T4", "--open",
+        "-p", "1-1000",
+        "-oN", "-",
+        host,
+    ], timeout=120)
+
+    # Extract open ports from discovery
+    open_ports = re.findall(r"(\d+)/tcp\s+open", discovery_raw)
+
+    if open_ports:
+        port_list = ",".join(open_ports)
+        status(f"Found {len(open_ports)} open ports — running service detection on {port_list}...")
+
+        # Phase 2 — service/version detection on open ports only
+        service_raw = _run([
+            "nmap", "-sV", "-sC",
+            "--open", "-T4",
+            "-p", port_list,
+            "-oN", "-",
+            host,
+        ], timeout=180)
+
+        output.append(f"=== NMAP (2-phase) ===\n{service_raw}")
+        _parse_nmap(service_raw, ctx, host)
+        status(f"Nmap complete — {len(ctx.ports)} services identified")
+    else:
+        status("No open ports found in discovery phase")
+        output.append(f"=== NMAP ===\n{discovery_raw}")
+        output.append("[no open ports found in top 1000]")
