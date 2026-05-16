@@ -65,7 +65,7 @@ def run_passive_recon(ctx: ScanContext, status: Callable[[str], None]) -> str:
         status(f"Running theHarvester on {host}...")
         raw = _run(
             ["theHarvester", "-d", host, "-b", "crtsh,dnsdumpster,threatminer", "-l", "100"],
-            timeout=120,
+            timeout=45,
         )
         output_parts.append(f"=== THEHARVESTER ===\n{raw}")
         for line in raw.splitlines():

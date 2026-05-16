@@ -18,7 +18,6 @@ def _run(cmd: list[str], timeout: int = 300) -> str:
 
 
 def _parse_nmap(raw: str, ctx: ScanContext, host: str):
-    """Parse Nmap output into context ports and services."""
     port_re = re.compile(r"(\d+)/(tcp|udp)\s+open\s+(\S+)\s*(.*)")
     for match in port_re.finditer(raw):
         port     = int(match.group(1))
@@ -99,13 +98,36 @@ def run_port_scan(ctx: ScanContext, status: Callable[[str], None]) -> str:
             ports_section = rs_raw.split("->")[-1]
             open_ports = re.findall(r'\b(\d+)\b', ports_section)
         elif re.search(r'\b\d+\b', rs_raw):
-            # fallback — just grab any numbers that look like ports
             open_ports = [p for p in re.findall(r'\b(\d+)\b', rs_raw)
                          if 1 <= int(p) <= 65535]
 
         if open_ports:
             port_list = ",".join(open_ports)
             status(f"RustScan found {len(open_ports)} open port(s) — running Nmap service detection on {port_list}...")
+
+            # Populate ports from RustScan immediately — don't wait for Nmap
+            for p in open_ports:
+                port_int = int(p)
+                if port_int not in ctx.ports:
+                    ctx.ports.append(port_int)
+                # Add basic service entry so ssl_audit and other modules fire
+                if not any(s.port == port_int for s in ctx.services):
+                    svc_name = "http" if port_int in (80, 8080) else \
+                               "https" if port_int in (443, 8443) else "unknown"
+                    ctx.services.append(Service(
+                        port=port_int, protocol="tcp",
+                        name=svc_name, product="", version="", extra="",
+                    ))
+                    ctx.add_finding(
+                        severity="info",
+                        title=f"Open port: {port_int}/{svc_name}",
+                        description=f"Port {port_int} is open (discovered by RustScan).",
+                        source="port_scan",
+                        host=host,
+                        port=port_int,
+                        tags=["port", svc_name],
+                        raw=rs_raw[:200],
+                    )
 
             # Phase 2 — Nmap service detection on open ports only
             nmap_raw = _run([
@@ -116,8 +138,11 @@ def run_port_scan(ctx: ScanContext, status: Callable[[str], None]) -> str:
             ], timeout=90)
 
             output.append(f"=== NMAP SERVICE DETECTION ===\n{nmap_raw}")
-            _parse_nmap(nmap_raw, ctx, host)
-            status(f"Port scan complete — {len(ctx.ports)} service(s) identified")
+
+            if "[timeout]" not in nmap_raw:
+                _parse_nmap(nmap_raw, ctx, host)
+
+            status(f"Port scan complete — {len(ctx.ports)} port(s) identified")
         else:
             status("RustScan found no open ports — falling back to Nmap...")
             _run_nmap(ctx, host, status, output)
@@ -131,12 +156,10 @@ def run_port_scan(ctx: ScanContext, status: Callable[[str], None]) -> str:
 
 
 def _run_nmap(ctx: ScanContext, host: str, status: Callable, output: list):
-    """2-phase Nmap — fast discovery then targeted service detection."""
     if not shutil.which("nmap"):
         output.append("[nmap not installed]")
         return
 
-    # Phase 1 — fast discovery, no service detection
     status(f"Nmap phase 1: fast port discovery on {host}...")
     discovery_raw = _run([
         "nmap", "-T4", "--open",
@@ -150,9 +173,14 @@ def _run_nmap(ctx: ScanContext, host: str, status: Callable, output: list):
 
     if open_ports:
         port_list = ",".join(open_ports)
+
+        # Populate ports immediately
+        for p in open_ports:
+            if int(p) not in ctx.ports:
+                ctx.ports.append(int(p))
+
         status(f"Found {len(open_ports)} open port(s) — running service detection on {port_list}...")
 
-        # Phase 2 — service detection on open ports only
         service_raw = _run([
             "nmap", "-sV", "-sC", "--open", "-T4",
             "-p", port_list,
@@ -161,8 +189,9 @@ def _run_nmap(ctx: ScanContext, host: str, status: Callable, output: list):
         ], timeout=90)
 
         output.append(f"=== NMAP (2-phase) ===\n{service_raw}")
-        _parse_nmap(service_raw, ctx, host)
-        status(f"Nmap complete — {len(ctx.ports)} service(s) identified")
+        if "[timeout]" not in service_raw:
+            _parse_nmap(service_raw, ctx, host)
+        status(f"Nmap complete — {len(ctx.ports)} port(s) identified")
     else:
         status("No open ports found in top 1000")
         output.append(f"=== NMAP ===\n{discovery_raw}")
