@@ -5,8 +5,8 @@ import typer
 from tui.app import NetCrawlerApp
 
 app = typer.Typer(
-    name="netcrawler",
     add_completion=False,
+    name="netcrawler",
     help="""
 \b
 NetCrawler — AI-Powered Pentesting Agent
@@ -19,8 +19,9 @@ Examples:
   netcrawler example.com
   netcrawler 192.168.1.1 --profile aggressive
   netcrawler example.com --model mistral --profile stealth
-  netcrawler example.com --verbose
-  netcrawler example.com --timeout 30
+  netcrawler example.com --scope "example.com,api.example.com"
+  netcrawler example.com --scope "192.168.1.0/24" --profile aggressive
+  netcrawler example.com --timeout 30 --verbose
 
 \b
 Profiles:
@@ -29,10 +30,10 @@ Profiles:
   aggressive  Full scan — all modules, fuzzing, vuln detection
 
 \b
-Models (requires Ollama):
-  deepseek-r1:14b   Best reasoning — recommended (default)
-  llama3            Lighter — good balance of speed and quality
-  mistral           Fastest — good for quick scans
+Scope:
+  Comma-separated list of allowed hosts, domains, or CIDR ranges.
+  The agent will refuse to scan anything outside this list.
+  The primary target is always implicitly in scope.
 
 \b
 Legal:
@@ -66,6 +67,12 @@ def run(
         help="Scan profile: stealth / default / aggressive",
         metavar="PROFILE",
     ),
+    scope: str = typer.Option(
+        "",
+        "--scope", "-s",
+        help='Engagement scope — comma separated hosts/CIDRs e.g. "example.com,192.168.1.0/24"',
+        metavar="SCOPE",
+    ),
     timeout: int = typer.Option(
         0,
         "--timeout", "-t",
@@ -87,6 +94,7 @@ def run(
         target=target,
         model=model,
         profile=profile,
+        scope=scope,
         verbose=verbose,
         timeout_minutes=timeout,
     )

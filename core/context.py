@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import re
 from urllib.parse import urlparse
+from core.scope import ScopeManager
 
 
 @dataclass
@@ -35,6 +36,7 @@ class ScanContext:
     model: str = "deepseek-r1:14b"
     profile: str = "default"
     verbose: bool = False
+    scope_str: str = ""
     started_at: datetime = field(default_factory=datetime.now)
 
     target_host: str = ""
@@ -57,8 +59,16 @@ class ScanContext:
     agent_thoughts: list[str] = field(default_factory=list)
     tool_outputs: dict[str, str] = field(default_factory=dict)
 
+    # Scope manager — initialised in __post_init__
+    scope: ScopeManager = field(default_factory=ScopeManager, init=False)
+
     def __post_init__(self):
         self.target_host, self.target_url, self.is_web = self._resolve(self.raw_target)
+        self.scope = ScopeManager(self.scope_str)
+
+        # Always add the primary target to scope implicitly
+        if self.scope.enabled and not self.scope.is_in_scope(self.target_host):
+            self.scope.rules.append(self.target_host.lower())
 
     @staticmethod
     def _resolve(target: str) -> tuple[str, str, bool]:
@@ -86,6 +96,7 @@ class ScanContext:
         lines = [
             f"Target: {self.target_host}",
             f"Scan profile: {self.profile}",
+            f"Scope: {self.scope.summary()}",
             f"Web target: {'yes (' + self.target_url + ')' if self.is_web else 'no'}",
             f"Completed stages: {', '.join(self.completed_stages) or 'none'}",
             f"Subdomains found: {len(self.subdomains)}",
@@ -98,4 +109,3 @@ class ScanContext:
             f"Findings: CRIT={counts['critical']} HIGH={counts['high']} MED={counts['medium']} LOW={counts['low']} INFO={counts['info']}",
         ]
         return "\n".join(lines)
-

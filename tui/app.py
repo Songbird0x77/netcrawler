@@ -57,12 +57,14 @@ class NetCrawlerApp:
         target: str,
         model: str,
         profile: str = "default",
+        scope: str = "",
         verbose: bool = False,
         timeout_minutes: int = 0,
     ):
         self.target          = target
         self.model           = model
         self.profile         = profile
+        self.scope           = scope
         self.verbose         = verbose
         self.timeout_minutes = timeout_minutes
         self.console         = Console()
@@ -75,6 +77,7 @@ class NetCrawlerApp:
             model=self.model,
             profile=self.profile,
             verbose=self.verbose,
+            scope_str=self.scope,
         )
         llm = OllamaClient(model=self.model)
 
@@ -83,6 +86,8 @@ class NetCrawlerApp:
         self.console.print(f"[bold green][*][/] Web     : {'yes — ' + ctx.target_url if ctx.is_web else 'no'}")
         self.console.print(f"[bold green][*][/] Model   : [magenta]{self.model}[/]")
         self.console.print(f"[bold green][*][/] Profile : [{pc}]{self.profile.upper()}[/]")
+        if self.scope:
+            self.console.print(f"[bold green][*][/] Scope   : [yellow]{self.scope}[/]")
         if self.timeout_minutes:
             self.console.print(f"[bold green][*][/] Timeout : {self.timeout_minutes} minutes")
         self.console.print(f"[bold green][*][/] Started : {datetime.now():%Y-%m-%d %H:%M:%S}\n")
@@ -185,6 +190,8 @@ class NetCrawlerApp:
         stats.add_column(style="bold cyan")
         stats.add_row("Target",      ctx.target_host)
         stats.add_row("Profile",     ctx.profile)
+        if self.scope:
+            stats.add_row("Scope", self.scope)
         stats.add_row("Duration",    f"{elapsed:.0f}s ({elapsed/60:.1f}m)")
         stats.add_row("Subdomains",  str(len(ctx.subdomains)))
         stats.add_row("Alive hosts", str(len(ctx.alive_hosts)))
