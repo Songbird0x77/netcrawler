@@ -18,6 +18,7 @@ def _run(cmd: list[str], timeout: int = 300) -> str:
 
 
 def _parse_nmap(raw: str, ctx: ScanContext, host: str):
+    """Parse Nmap output into context ports and services."""
     port_re = re.compile(r"(\d+)/(tcp|udp)\s+open\s+(\S+)\s*(.*)")
     for match in port_re.finditer(raw):
         port     = int(match.group(1))
@@ -40,38 +41,43 @@ def _parse_nmap(raw: str, ctx: ScanContext, host: str):
                 product=product, version=version, extra=extra,
             ))
 
+    # Generate findings — once per port only
     interesting = {
-        21:    ("ftp",       "high"),
-        22:    ("ssh",       "info"),
-        23:    ("telnet",    "high"),
-        25:    ("smtp",      "medium"),
-        80:    ("http",      "info"),
-        443:   ("https",     "info"),
-        445:   ("smb",       "high"),
-        3306:  ("mysql",     "high"),
-        3389:  ("rdp",       "high"),
-        5432:  ("postgres",  "high"),
-        6379:  ("redis",     "high"),
-        8080:  ("http-alt",  "info"),
-        8443:  ("https-alt", "info"),
-        27017: ("mongodb",   "high"),
+        21:    ("ftp",      "high"),
+        22:    ("ssh",      "info"),
+        23:    ("telnet",   "high"),
+        25:    ("smtp",     "medium"),
+        80:    ("http",     "info"),
+        443:   ("https",    "info"),
+        445:   ("smb",      "high"),
+        3306:  ("mysql",    "high"),
+        3389:  ("rdp",      "high"),
+        5432:  ("postgres", "high"),
+        6379:  ("redis",    "high"),
+        8080:  ("http-alt", "info"),
+        8443:  ("https-alt","info"),
+        27017: ("mongodb",  "high"),
     }
+    existing_titles = {f.title for f in ctx.findings}
     for svc in ctx.services:
         if svc.port in interesting:
             _, severity = interesting[svc.port]
-            ctx.add_finding(
-                severity=severity,
-                title=f"Open port: {svc.port}/{svc.name}",
-                description=(
-                    f"Port {svc.port} ({svc.name}) is open. "
-                    f"{svc.product} {svc.version}".strip()
-                ),
-                source="port_scan",
-                host=host,
-                port=svc.port,
-                tags=["port", svc.name],
-                raw=raw[:300],
-            )
+            title = f"Open port: {svc.port}/{svc.name}"
+            if title not in existing_titles:
+                ctx.add_finding(
+                    severity=severity,
+                    title=title,
+                    description=(
+                        f"Port {svc.port} ({svc.name}) is open. "
+                        f"{svc.product} {svc.version}".strip()
+                    ),
+                    source="port_scan",
+                    host=host,
+                    port=svc.port,
+                    tags=["port", svc.name],
+                    raw=raw[:300],
+                )
+                existing_titles.add(title)
 
 
 def run_port_scan(ctx: ScanContext, status: Callable[[str], None]) -> str:
@@ -79,7 +85,6 @@ def run_port_scan(ctx: ScanContext, status: Callable[[str], None]) -> str:
     output = []
 
     if shutil.which("rustscan"):
-        # Phase 1 — RustScan fast discovery
         status(f"Running RustScan on {host} (fast port discovery)...")
         rs_raw = _run([
             "rustscan",
@@ -105,31 +110,12 @@ def run_port_scan(ctx: ScanContext, status: Callable[[str], None]) -> str:
             port_list = ",".join(open_ports)
             status(f"RustScan found {len(open_ports)} open port(s) — running Nmap service detection on {port_list}...")
 
-            # Populate ports from RustScan immediately — don't wait for Nmap
+            # Populate ports from RustScan immediately
             for p in open_ports:
-                port_int = int(p)
-                if port_int not in ctx.ports:
-                    ctx.ports.append(port_int)
-                # Add basic service entry so ssl_audit and other modules fire
-                if not any(s.port == port_int for s in ctx.services):
-                    svc_name = "http" if port_int in (80, 8080) else \
-                               "https" if port_int in (443, 8443) else "unknown"
-                    ctx.services.append(Service(
-                        port=port_int, protocol="tcp",
-                        name=svc_name, product="", version="", extra="",
-                    ))
-                    ctx.add_finding(
-                        severity="info",
-                        title=f"Open port: {port_int}/{svc_name}",
-                        description=f"Port {port_int} is open (discovered by RustScan).",
-                        source="port_scan",
-                        host=host,
-                        port=port_int,
-                        tags=["port", svc_name],
-                        raw=rs_raw[:200],
-                    )
+                if int(p) not in ctx.ports:
+                    ctx.ports.append(int(p))
 
-            # Phase 2 — Nmap service detection on open ports only
+            # Nmap service detection on open ports only
             nmap_raw = _run([
                 "nmap", "-sV", "-sC", "--open", "-T4",
                 "-p", port_list,
@@ -141,6 +127,35 @@ def run_port_scan(ctx: ScanContext, status: Callable[[str], None]) -> str:
 
             if "[timeout]" not in nmap_raw:
                 _parse_nmap(nmap_raw, ctx, host)
+            else:
+                # Nmap timed out — add basic findings from RustScan data
+                status("Nmap timed out — adding basic port findings from RustScan...")
+                existing_titles = {f.title for f in ctx.findings}
+                for p in open_ports:
+                    port_int = int(p)
+                    svc_name = "http"  if port_int in (80, 8080)  else \
+                               "https" if port_int in (443, 8443) else \
+                               "ssh"   if port_int == 22          else \
+                               "ftp"   if port_int == 21          else \
+                               "unknown"
+                    if not any(s.port == port_int for s in ctx.services):
+                        ctx.services.append(Service(
+                            port=port_int, protocol="tcp",
+                            name=svc_name, product="", version="", extra="",
+                        ))
+                    title = f"Open port: {port_int}/{svc_name}"
+                    if title not in existing_titles:
+                        ctx.add_finding(
+                            severity="info",
+                            title=title,
+                            description=f"Port {port_int} is open (RustScan, Nmap timed out).",
+                            source="port_scan",
+                            host=host,
+                            port=port_int,
+                            tags=["port", svc_name],
+                            raw=rs_raw[:200],
+                        )
+                        existing_titles.add(title)
 
             status(f"Port scan complete — {len(ctx.ports)} port(s) identified")
         else:
@@ -156,6 +171,7 @@ def run_port_scan(ctx: ScanContext, status: Callable[[str], None]) -> str:
 
 
 def _run_nmap(ctx: ScanContext, host: str, status: Callable, output: list):
+    """2-phase Nmap — fast discovery then targeted service detection."""
     if not shutil.which("nmap"):
         output.append("[nmap not installed]")
         return
@@ -173,8 +189,6 @@ def _run_nmap(ctx: ScanContext, host: str, status: Callable, output: list):
 
     if open_ports:
         port_list = ",".join(open_ports)
-
-        # Populate ports immediately
         for p in open_ports:
             if int(p) not in ctx.ports:
                 ctx.ports.append(int(p))
