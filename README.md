@@ -1,4 +1,6 @@
-# NetCrawler — AI Pentesting Agent
+# NetCrawler
+
+[![NetCrawler Demo](https://asciinema.org/a/8NPhsBkJEweGWaw3.svg)](https://asciinema.org/a/8NPhsBkJEweGWaw3) — AI Pentesting Agent
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
